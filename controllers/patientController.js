@@ -16,10 +16,10 @@ const createRecord = async (req, res) => {
     let riskResult = null;
     try {
       riskResult = await detectRisk({
-        patientName: req.body.patientName,
-        disease: req.body.disease,
-        bloodPressure: req.body.bloodPressure,
-        notes: req.body.notes || '',
+        bp: req.body.bloodPressure,
+        blood_sugar: req.body.vitals?.bloodSugar,
+        weight: req.body.weight,
+        height: req.body.height
       });
     } catch (mlErr) {
       // Degrade gracefully: save record without ML result
