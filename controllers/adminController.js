@@ -145,64 +145,82 @@ const uploadStudents = async (req, res) => {
 
     const results = [];
     for (const s of students) {
-      // Check by studentId first
-      if (s.studentId) {
-        const existsByStudentId = await User.findOne({ studentId: s.studentId });
-        if (existsByStudentId) {
-          results.push({ studentId: s.studentId, name: existsByStudentId.name, created: false, reason: 'Student ID already exists' });
-          continue;
+      try {
+        // Check by studentId first
+        if (s.studentId) {
+          const existsByStudentId = await User.findOne({ studentId: s.studentId });
+          if (existsByStudentId) {
+            results.push({ studentId: s.studentId, name: existsByStudentId.name, created: false, reason: 'Student ID already exists' });
+            continue;
+          }
+        }
+
+        // Check by email if provided and non-empty
+        if (s.email && s.email.trim()) {
+          const existsByEmail = await User.findOne({ email: s.email.toLowerCase().trim() });
+          if (existsByEmail) {
+            results.push({ studentId: s.studentId, email: s.email, name: existsByEmail.name, created: false, reason: 'Email already exists' });
+            continue;
+          }
+        }
+
+        // Create new student - password defaults to studentId
+        const password = s.password || s.studentId || 'VillageHealth@123';
+        const userData = {
+          name: s.name || `Student ${s.studentId}`,
+          password: password,
+          role: 'student',
+        };
+
+        // studentId is required for this flow
+        if (s.studentId) {
+          userData.studentId = s.studentId;
+        }
+
+        // Email is optional - only set if non-empty
+        if (s.email && s.email.trim()) {
+          userData.email = s.email.toLowerCase().trim();
+        }
+
+        const user = await User.create(userData);
+        results.push({
+          id: user._id,
+          studentId: user.studentId,
+          name: user.name,
+          password: password,
+          created: true,
+        });
+      } catch (innerErr) {
+        // Handle duplicate key error for individual student
+        if (innerErr.code === 11000) {
+          const field = Object.keys(innerErr.keyPattern || {})[0] || 'unknown';
+          results.push({
+            studentId: s.studentId,
+            created: false,
+            reason: `Duplicate ${field}: already exists in database`,
+          });
+        } else {
+          results.push({
+            studentId: s.studentId,
+            created: false,
+            reason: innerErr.message || 'Creation failed',
+          });
         }
       }
-
-      // Check by email if provided
-      if (s.email) {
-        const existsByEmail = await User.findOne({ email: s.email.toLowerCase() });
-        if (existsByEmail) {
-          results.push({ studentId: s.studentId, email: s.email, name: existsByEmail.name, created: false, reason: 'Email already exists' });
-          continue;
-        }
-      }
-
-      // Create new student - password defaults to studentId
-      const password = s.password || s.studentId || 'VillageHealth@123';
-      const userData = {
-        name: s.name || `Student ${s.studentId}`,
-        password: password,
-        role: 'student',
-      };
-
-      // studentId is required for this flow
-      if (s.studentId) {
-        userData.studentId = s.studentId;
-      }
-
-      // Email is optional
-      if (s.email) {
-        userData.email = s.email.toLowerCase().trim();
-      }
-
-      const user = await User.create(userData);
-      results.push({ 
-        id: user._id, 
-        studentId: user.studentId, 
-        name: user.name, 
-        password: password, // Return plain password for admin reference
-        created: true 
-      });
     }
 
     const created = results.filter(r => r.created).length;
     const skipped = results.filter(r => !r.created).length;
 
-    res.status(201).json({ 
-      message: `Students processed: ${created} created, ${skipped} skipped`, 
+    res.status(201).json({
+      message: `Students processed: ${created} created, ${skipped} skipped`,
       created,
       skipped,
-      results 
+      results,
     });
   } catch (err) {
     console.error('Upload students error:', err.message);
-    res.status(500).json({ message: 'Failed to upload students' });
+    res.status(500).json({ message: 'Failed to upload students: ' + err.message });
   }
 };
 
@@ -235,40 +253,46 @@ const runClustering = async (req, res) => {
       return res.status(400).json({ message: 'No students found for assignment' });
     }
 
-    const clusterResult = await clusterHouses(
-      houses.map((h) => ({
-        id: h._id.toString(),
-        latitude: h.latitude,
-        longitude: h.longitude,
-        riskLevel: h.riskLevel,
-      }))
-    );
+    // ML service expects: { students: int, houses: [{ id, lat, lng }] }
+    const mlHouses = houses.map((h) => ({
+      id: h._id.toString(),
+      lat: h.latitude,
+      lng: h.longitude,
+    }));
 
-    const assignments = clusterResult.assignments || [];
+    const clusterResult = await clusterHouses(students.length, mlHouses);
+
+    // ML returns: { clusters: { "0": ["houseId1", ...], "1": [...] } }
+    const clusters = clusterResult.clusters || {};
     await HouseAssignment.deleteMany({});
 
     const studentIds = students.map((s) => s._id);
     const saved = [];
 
-    for (const a of assignments) {
-      const studentIndex = a.clusterId % studentIds.length;
-      const studentId = studentIds[studentIndex];
+    // Assign each cluster's houses to a student
+    const clusterKeys = Object.keys(clusters);
+    for (let i = 0; i < clusterKeys.length; i++) {
+      const clusterId = parseInt(clusterKeys[i], 10);
+      const houseIds = clusters[clusterKeys[i]] || [];
+      const studentId = studentIds[i % studentIds.length];
 
-      await House.findByIdAndUpdate(a.houseId, { assignedStudentId: studentId });
+      for (const houseId of houseIds) {
+        await House.findByIdAndUpdate(houseId, { assignedStudentId: studentId });
 
-      const doc = await HouseAssignment.create({
-        houseId: a.houseId,
-        studentId,
-        clusterId: a.clusterId,
-      });
-      saved.push(doc);
+        const doc = await HouseAssignment.create({
+          houseId,
+          studentId,
+          clusterId,
+        });
+        saved.push(doc);
+      }
     }
 
     res.status(200).json({
       message: 'Clustering complete',
       studentsAssigned: students.length,
       housesAssigned: saved.length,
-      totalClusters: clusterResult.totalClusters || new Set(assignments.map(a => a.clusterId)).size,
+      totalClusters: clusterKeys.length,
       assignments: saved.length,
       clusterResult,
     });

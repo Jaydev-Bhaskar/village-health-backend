@@ -2,7 +2,7 @@ const axios = require('axios');
 
 const mlClient = axios.create({
   baseURL: process.env.ML_API_URL,
-  timeout: 15000,
+  timeout: 30000,
   headers: { 'Content-Type': 'application/json' },
 });
 
@@ -18,11 +18,17 @@ const detectRisk = async (patientData) => {
 
 /**
  * Call ML cluster-houses endpoint.
- * @param {Array} houses - list of house objects with lat/lng
+ * ML expects: { students: int, houses: [{ id, lat, lng }] }
+ * ML returns: { clusters: { "0": ["houseId1", ...], "1": [...] } }
+ * @param {number} studentCount - number of students
+ * @param {Array} houses - list of house objects with id, lat, lng
  * @returns {Promise<Object>} ML clustering result
  */
-const clusterHouses = async (houses) => {
-  const response = await mlClient.post('/api/v1/cluster-houses', { houses });
+const clusterHouses = async (studentCount, houses) => {
+  const response = await mlClient.post('/api/v1/cluster-houses', {
+    students: studentCount,
+    houses: houses,
+  });
   return response.data;
 };
 
