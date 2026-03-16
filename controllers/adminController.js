@@ -135,6 +135,7 @@ const getAnalytics = async (req, res) => {
 };
 
 // POST /api/admin/upload-students
+// If studentId exists => skip, if not => create with password = studentId
 const uploadStudents = async (req, res) => {
   try {
     const students = req.body.students;
@@ -144,22 +145,63 @@ const uploadStudents = async (req, res) => {
 
     const results = [];
     for (const s of students) {
-      const exists = await User.findOne({ email: s.email });
-      if (!exists) {
-        const user = await User.create({
-          name: s.name,
-          email: s.email,
-          password: s.password || 'VillageHealth@123',
-          role: 'student',
-        });
-        results.push({ id: user._id, email: user.email, created: true });
-      } else {
-        results.push({ id: exists._id, email: exists.email, created: false });
+      // Check by studentId first
+      if (s.studentId) {
+        const existsByStudentId = await User.findOne({ studentId: s.studentId });
+        if (existsByStudentId) {
+          results.push({ studentId: s.studentId, name: existsByStudentId.name, created: false, reason: 'Student ID already exists' });
+          continue;
+        }
       }
+
+      // Check by email if provided
+      if (s.email) {
+        const existsByEmail = await User.findOne({ email: s.email.toLowerCase() });
+        if (existsByEmail) {
+          results.push({ studentId: s.studentId, email: s.email, name: existsByEmail.name, created: false, reason: 'Email already exists' });
+          continue;
+        }
+      }
+
+      // Create new student - password defaults to studentId
+      const password = s.password || s.studentId || 'VillageHealth@123';
+      const userData = {
+        name: s.name || `Student ${s.studentId}`,
+        password: password,
+        role: 'student',
+      };
+
+      // studentId is required for this flow
+      if (s.studentId) {
+        userData.studentId = s.studentId;
+      }
+
+      // Email is optional
+      if (s.email) {
+        userData.email = s.email.toLowerCase().trim();
+      }
+
+      const user = await User.create(userData);
+      results.push({ 
+        id: user._id, 
+        studentId: user.studentId, 
+        name: user.name, 
+        password: password, // Return plain password for admin reference
+        created: true 
+      });
     }
 
-    res.status(201).json({ message: 'Students processed', results });
+    const created = results.filter(r => r.created).length;
+    const skipped = results.filter(r => !r.created).length;
+
+    res.status(201).json({ 
+      message: `Students processed: ${created} created, ${skipped} skipped`, 
+      created,
+      skipped,
+      results 
+    });
   } catch (err) {
+    console.error('Upload students error:', err.message);
     res.status(500).json({ message: 'Failed to upload students' });
   }
 };
@@ -175,6 +217,7 @@ const uploadHouses = async (req, res) => {
     const created = await House.insertMany(houses, { ordered: false });
     res.status(201).json({ message: 'Houses uploaded', count: created.length });
   } catch (err) {
+    console.error('Upload houses error:', err.message);
     res.status(500).json({ message: 'Failed to upload houses' });
   }
 };
@@ -188,10 +231,13 @@ const runClustering = async (req, res) => {
     if (houses.length === 0) {
       return res.status(400).json({ message: 'No houses found to cluster' });
     }
+    if (students.length === 0) {
+      return res.status(400).json({ message: 'No students found for assignment' });
+    }
 
     const clusterResult = await clusterHouses(
       houses.map((h) => ({
-        id: h._id,
+        id: h._id.toString(),
         latitude: h.latitude,
         longitude: h.longitude,
         riskLevel: h.riskLevel,
@@ -220,13 +266,73 @@ const runClustering = async (req, res) => {
 
     res.status(200).json({
       message: 'Clustering complete',
+      studentsAssigned: students.length,
+      housesAssigned: saved.length,
+      totalClusters: clusterResult.totalClusters || new Set(assignments.map(a => a.clusterId)).size,
       assignments: saved.length,
       clusterResult,
     });
   } catch (err) {
     console.error('Clustering error:', err.message);
-    res.status(500).json({ message: 'Clustering failed' });
+    res.status(500).json({ message: 'Clustering failed: ' + err.message });
   }
 };
 
-module.exports = { getAdminDashboard, getAnalytics, uploadStudents, uploadHouses, runClustering };
+// GET /api/admin/students - Get all students with their passwords
+const getAllStudents = async (req, res) => {
+  try {
+    const students = await User.find({ role: 'student' })
+      .select('+plainPassword')
+      .sort({ createdAt: -1 })
+      .lean();
+
+    const studentData = students.map(s => ({
+      id: s._id,
+      name: s.name,
+      studentId: s.studentId || 'N/A',
+      email: s.email || 'N/A',
+      password: s.plainPassword || s.studentId || 'N/A',
+      createdAt: s.createdAt,
+    }));
+
+    res.status(200).json({
+      success: true,
+      count: studentData.length,
+      data: studentData,
+    });
+  } catch (err) {
+    console.error('Get students error:', err.message);
+    res.status(500).json({ message: 'Failed to fetch students' });
+  }
+};
+
+// POST /api/admin/reset-password - Admin resets a student's password
+const resetStudentPassword = async (req, res) => {
+  try {
+    const { userId, newPassword } = req.body;
+    if (!userId || !newPassword) {
+      return res.status(400).json({ message: 'Please provide userId and newPassword' });
+    }
+
+    const user = await User.findById(userId);
+    if (!user) return res.status(404).json({ message: 'User not found' });
+
+    user.password = newPassword;
+    await user.save();
+
+    res.status(200).json({ message: 'Password reset successfully' });
+  } catch (err) {
+    console.error('Reset password error:', err.message);
+    res.status(500).json({ message: 'Failed to reset password' });
+  }
+};
+
+module.exports = { 
+  getAdminDashboard, 
+  getAnalytics, 
+  uploadStudents, 
+  uploadHouses, 
+  runClustering, 
+  getAllStudents,
+  resetStudentPassword,
+};
