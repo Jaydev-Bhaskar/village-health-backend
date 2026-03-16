@@ -114,6 +114,9 @@ const getAnalytics = async (req, res) => {
       if (bmiDist[key] !== undefined) bmiDist[key] = b.count;
     }
 
+    // House locations for map
+    const houses = await House.find({}).select('address latitude longitude riskLevel').lean();
+
     res.status(200).json({
       success: true,
       data: {
@@ -126,6 +129,13 @@ const getAnalytics = async (req, res) => {
           high: { count: riskDistribution.high, percentage: Math.round((riskDistribution.high / riskTotal) * 100) },
         },
         bmiDistribution: bmiDist,
+        houses: houses.map((h) => ({
+          id: h._id,
+          address: h.address,
+          latitude: h.latitude,
+          longitude: h.longitude,
+          riskLevel: h.riskLevel || 'LOW',
+        })),
       },
     });
   } catch (err) {
